@@ -796,6 +796,9 @@
   function setupTrackCapabilities(){
     if(!currentTrack || !currentTrack.getCapabilities) return;
     let caps={}; try{ caps=currentTrack.getCapabilities(); }catch(e){}
+    if(caps.focusMode && caps.focusMode.indexOf('continuous')>-1){
+      try{ currentTrack.applyConstraints({advanced:[{focusMode:'continuous'}]}); }catch(e){}
+    }
     torchCapable = !!caps.torch;
     torchBtn.classList.toggle('hide', !torchCapable);
     if(caps.zoom && typeof caps.zoom.max==='number'){
@@ -844,9 +847,15 @@
       running=true;
       setMode('nav');
       startListening(false);
-      speak('Navigate mode. Move slowly and I will tell you what is ahead. '
-        + 'Voice control is on \u2014 say help any time to hear the commands.',{interrupt:true});
+      if(objModel){
+        speak('Navigate mode. Move slowly and I will tell you what is ahead. '
+          + 'Voice control is on \u2014 say help any time to hear the commands.',{interrupt:true});
+      } else {
+        speak('Warning. Object detection did not load, so I cannot warn you about obstacles. '
+          + 'Text reading and voice commands still work. Check your internet connection and reload.',{interrupt:true});
+      }
       detectLoop();
+      setTimeout(()=>{ if(running && currentMode==='nav' && objModel) announceScene(true); }, 2600);
     }catch(e){
       startBtn.disabled=false;
       console.error(e);
@@ -895,6 +904,19 @@
   let warnKey='', warnBand=0, warnSaid=0, warnLastSay=0, warnGoneAt=0;
   function resetWarn(){ warnKey=''; warnBand=0; warnSaid=0; warnGoneAt=0; }
 
+  let lastHeartbeat=0, detectFails=0, lastFailSay=0, sawAnyFrame=false;
+  const HEARTBEAT_MS=11000;
+
+  function heartbeat(now,kind){
+    if(!autoAnnounce.checked || anyPanelOpen()) return;
+    if(now-lastHeartbeat < HEARTBEAT_MS) return;
+    if(now-warnLastSay < 5000) return;
+    lastHeartbeat=now;
+    if(kind==='clear') speak('Path looks clear.',{interrupt:false});
+    else if(kind==='nomodel') speak('Object detection did not load, so I cannot warn you about obstacles. Check your internet connection and reload.',{interrupt:false});
+    else if(kind==='fail') speak('I am having trouble reading the camera.',{interrupt:false});
+  }
+
   let alertMsg='', alertHideT=null;
   function setAlert(msg){
     if(!msg){
@@ -914,15 +936,23 @@
   async function detectLoop(){
     if(!running){ return; }
     const now=performance.now();
+    if(currentMode==='nav' && !document.hidden && !objModel){
+      heartbeat(now,'nomodel');
+    }
     if(currentMode==='nav' && !document.hidden && objModel && now-lastDetectAt>DETECT_EVERY && video.readyState>=2){
       lastDetectAt=now;
       setStatus('Scanning',true);
       try{
         const preds = await objModel.detect(video, 8);
         lastDetections = preds.filter(p=>p.score>0.55);
+        sawAnyFrame=true; detectFails=0;
         drawBoxes(lastDetections);
         handleAuto(lastDetections);
-      }catch(e){}
+      }catch(e){
+        detectFails++;
+        console.warn('detect failed',e);
+        if(detectFails>4 && now-lastFailSay>15000){ lastFailSay=now; heartbeat(now,'fail'); }
+      }
       setStatus('Watching',false);
       updateReadout();
     }
@@ -975,9 +1005,10 @@
   function handleAuto(preds){
     const now=performance.now();
     if(!preds.length){
-      nearestReadout='—'; setAlert(null);
+      nearestReadout='clear'; setAlert(null);
       if(!warnGoneAt) warnGoneAt=now;
       if(now-warnGoneAt>2500) resetWarn();
+      heartbeat(now,'clear');
       return;
     }
     warnGoneAt=0;
@@ -1020,6 +1051,7 @@
     if(!should) return;
     warnSaid = (isNew||escalated) ? 1 : warnSaid+1;
     warnLastSay=now;
+    lastHeartbeat=now;
 
     let msg;
     if(band===2) msg=label+' very close '+CENTER_LABELS[d.pos]+'. Stop.';
@@ -1029,8 +1061,9 @@
   }
 
   function announceScene(force){
-    if(!objModel){ speak('Object detection is not available right now.'); return; }
-    if(!lastDetections.length){ speak('I cannot see any clear objects ahead. Try moving the camera slowly.'); return; }
+    if(!objModel){ speak('Object detection did not load, so I cannot see objects. Check your connection and reload the page.',{interrupt:true}); return; }
+    if(!sawAnyFrame){ speak('The camera has not given me a clear frame yet. Give it a moment.',{interrupt:true}); return; }
+    if(!lastDetections.length){ speak('Nothing that I recognise is ahead. The path looks clear.',{interrupt:true}); return; }
     const groups={};
     lastDetections.forEach(p=>{ const d=describe(p);
       const k=p.class+'|'+d.pos; groups[k]=groups[k]||{n:0,label:p.class,pos:d.pos,near:false};
@@ -1093,44 +1126,143 @@
     return out.replace(/[ \t]+\n/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
   }
 
+  function speakableText(t){
+    return t.replace(/[^\S\n]+/g,' ')
+            .split('\n')
+            .map(l=>l.trim())
+            .filter(l=>{
+              if(!l) return false;
+              const alnum=(l.match(/[A-Za-z0-9]/g)||[]).length;
+              return alnum>=2 && alnum>=l.length*0.4;
+            })
+            .join('. ')
+            .replace(/\.{2,}/g,'.')
+            .trim();
+  }
+
+  function newCanvas(w,h){
+    const c=document.createElement('canvas');
+    c.width=w; c.height=h;
+    const x=c.getContext('2d',{willReadFrequently:true});
+    x.imageSmoothingEnabled=true; x.imageSmoothingQuality='high';
+    return {c,x};
+  }
+
+  function sharpnessOf(srcCanvas){
+    const W=320, H=Math.max(1,Math.round(srcCanvas.height*W/srcCanvas.width));
+    const {c,x}=newCanvas(W,H);
+    x.drawImage(srcCanvas,0,0,W,H);
+    const im=x.getImageData(0,0,W,H).data;
+    const g=new Float32Array(W*H);
+    for(let i=0,j=0;i<im.length;i+=4,j++) g[j]=0.299*im[i]+0.587*im[i+1]+0.114*im[i+2];
+    let sum=0,sum2=0,n=0;
+    for(let y=1;y<H-1;y++)for(let xx=1;xx<W-1;xx++){
+      const k=y*W+xx;
+      const lap=-4*g[k]+g[k-1]+g[k+1]+g[k-W]+g[k+W];
+      sum+=lap; sum2+=lap*lap; n++;
+    }
+    if(!n) return 0;
+    const mean=sum/n;
+    return sum2/n-mean*mean;
+  }
+
+  function grabFrame(){
+    const vw=video.videoWidth||1280, vh=video.videoHeight||720;
+    const {c,x}=newCanvas(vw,vh);
+    x.drawImage(video,0,0,vw,vh);
+    return c;
+  }
+
+  function cropCenter(srcCanvas,fx,fy){
+    const sw=Math.round(srcCanvas.width*fx), sh=Math.round(srcCanvas.height*fy);
+    const sx=Math.round((srcCanvas.width-sw)/2), sy=Math.round((srcCanvas.height-sh)/2);
+    const target=1900;
+    const scale=Math.min(3, Math.max(1, target/sw));
+    const {c,x}=newCanvas(Math.round(sw*scale), Math.round(sh*scale));
+    x.drawImage(srcCanvas, sx,sy,sw,sh, 0,0,c.width,c.height);
+    return c;
+  }
+
+  async function setPSM(mode){
+    if(!ocrWorker) return;
+    try{ await ocrWorker.setParameters({tessedit_pageseg_mode:String(mode)}); }catch(e){}
+  }
+
+  let ocrRunning=false;
+
   async function runOCR(){
     if(!ocrWorker){ speak('The text reader is not available right now.'); showToast('OCR engine did not load.',true); return; }
+    if(ocrRunning){ speak('Still reading. One moment.'); return; }
+    if(!video.videoWidth){ speak('The camera is not ready yet.',{interrupt:true}); return; }
+    ocrRunning=true;
     setMode('read');
-    ocrbusy.classList.add('show'); ocrlab.textContent='Capturing…';
-    speak('Capturing. Hold steady.',{interrupt:true});
+    ocrbusy.classList.add('show'); ocrlab.textContent='Hold steady…';
+    speak('Hold steady.',{interrupt:true});
     setStatus('Reading',true);
     buzz(30);
 
-    await new Promise(r=>setTimeout(r,400));
-
-    const vw=video.videoWidth||1280, vh=video.videoHeight||720;
-    const scale = vw<1600 ? Math.min(2,1600/vw) : 1;
-    const cap=document.createElement('canvas');
-    cap.width=Math.round(vw*scale); cap.height=Math.round(vh*scale);
-    const cctx=cap.getContext('2d',{willReadFrequently:true});
-    cctx.imageSmoothingEnabled=true; cctx.imageSmoothingQuality='high';
-    cctx.drawImage(video,0,0,cap.width,cap.height);
-    try{ toGrayStretch(cctx,cap.width,cap.height); }catch(e){}
-
     try{
-      ocrlab.textContent='Reading text…';
-      let best=(await ocrWorker.recognize(cap)).data;
-      if(scoreOCR(best)<60){
-        ocrlab.textContent='Enhancing…';
-        try{ otsuBinarise(cctx,cap.width,cap.height); }catch(e){}
-        const second=(await ocrWorker.recognize(cap)).data;
-        if(scoreOCR(second)>scoreOCR(best)) best=second;
+      await new Promise(r=>setTimeout(r,900));
+
+      ocrlab.textContent='Capturing…';
+      let bestFrame=null, bestSharp=-1;
+      for(let i=0;i<3;i++){
+        const f=grabFrame();
+        const s=sharpnessOf(f);
+        if(s>bestSharp){ bestSharp=s; bestFrame=f; }
+        if(i<2) await new Promise(r=>setTimeout(r,220));
       }
+      buzz(15);
+
+      if(bestSharp<12){
+        ocrbusy.classList.remove('show'); setStatus('Ready',false); ocrRunning=false;
+        readtext.textContent='The image was too blurry to read. Hold the phone still, move about a hand-span from the text, and try again. The flashlight button can help in low light.';
+        readtext.classList.add('empty'); sheetSub.textContent='Too blurry';
+        openSheet();
+        speak('Too blurry to read. Hold the phone still and try again.',{interrupt:true});
+        return;
+      }
+
+      const crop=cropCenter(bestFrame,0.92,0.72);
+      const cctx=crop.getContext('2d',{willReadFrequently:true});
+      const pristine=newCanvas(crop.width,crop.height);
+      pristine.x.drawImage(crop,0,0);
+
+      try{ toGrayStretch(cctx,crop.width,crop.height); }catch(e){}
+
+      ocrlab.textContent='Reading text…';
+      await setPSM(6);
+      let best=(await ocrWorker.recognize(crop)).data;
+      let bestScore=scoreOCR(best);
+
+      if(bestScore<60){
+        ocrlab.textContent='Enhancing…';
+        try{ otsuBinarise(cctx,crop.width,crop.height); }catch(e){}
+        const second=(await ocrWorker.recognize(crop)).data;
+        if(scoreOCR(second)>bestScore){ best=second; bestScore=scoreOCR(second); }
+      }
+
+      if(bestScore<60){
+        ocrlab.textContent='Trying wider view…';
+        await setPSM(11);
+        const wide=cropCenter(bestFrame,1,1);
+        try{ toGrayStretch(wide.getContext('2d',{willReadFrequently:true}),wide.width,wide.height); }catch(e){}
+        const third=(await ocrWorker.recognize(wide)).data;
+        if(scoreOCR(third)>bestScore){ best=third; bestScore=scoreOCR(third); }
+      }
+
       const text=cleanOCR(best);
+      const spoken=speakableText(text);
       ocrbusy.classList.remove('show'); setStatus('Ready',false);
-      if(text && text.replace(/\s/g,'').length>1){
+
+      if(spoken && spoken.replace(/\s/g,'').length>2){
         readtext.textContent=text; readtext.classList.remove('empty');
         sheetSub.textContent='Playing aloud…';
         pushHistory(text);
         openSheet();
-        speak(text,{interrupt:true});
+        speak(spoken,{interrupt:true});
       }else{
-        readtext.textContent='No readable text found. Move closer, steady the camera, and make sure there is good light. Tip: the flashlight button can help.';
+        readtext.textContent='No readable text found. Move closer, hold steady, and make sure there is good light. Tip: the flashlight button can help.';
         readtext.classList.add('empty'); sheetSub.textContent='Nothing detected';
         openSheet();
         speak('No readable text found. Move closer and try again in better light.',{interrupt:true});
@@ -1139,6 +1271,9 @@
       ocrbusy.classList.remove('show'); setStatus('Ready',false);
       console.error(e); showToast('Reading failed. Try again.',true);
       speak('Sorry, reading failed. Please try again.',{interrupt:true});
+    }finally{
+      ocrRunning=false;
+      await setPSM(6);
     }
   }
 
@@ -1515,6 +1650,18 @@
       {interrupt:true});
   }
 
+  function speakDiagnostics(){
+    const bits=[];
+    bits.push(objModel? 'Object detection loaded.' : 'Object detection FAILED to load.');
+    bits.push(ocrWorker? 'Text reader loaded.' : 'Text reader failed to load.');
+    bits.push(currentTrack? ('Camera running at '+(video.videoWidth||0)+' by '+(video.videoHeight||0)+'.') : 'Camera not running.');
+    bits.push(sawAnyFrame? 'I am receiving camera frames.' : 'I have not received a usable frame yet.');
+    bits.push('Currently seeing '+lastDetections.length+' object'+(lastDetections.length===1?'':'s')+'.');
+    bits.push('Auto announce is '+(autoAnnounce.checked?'on':'off')+'.');
+    bits.push('Mode is '+(currentMode==='nav'?'navigate':'read text')+'.');
+    speak(bits.join(' '),{interrupt:true});
+  }
+
   const ASK_ACTIONS={
     weather:answerWeather, time:answerTime, date:answerDate, battery:answerBattery,
     scene:()=>{ setMode('nav'); announceScene(true); }, count:answerCount,
@@ -1725,6 +1872,8 @@
       else toggleTorch();
       return;
     }
+
+    if(/\b(diagnostics?|status|self ?test|system check|are you working|is it working|why are you quiet|test)\b/.test(said)){ speakDiagnostics(); return; }
 
     if(/ahead|describe|scene|what.?s there|what.?s in front|what do you see|look around|surroundings?/.test(said)){
       setMode('nav'); announceScene(true); return; }
