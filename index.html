@@ -1679,7 +1679,7 @@
     if(/\bgood morning\b/.test(said)){ speak('Good morning!',{interrupt:true}); return true; }
     if(/\bgood (afternoon|evening)\b/.test(said)){ speak('Good '+(/afternoon/.test(said)?'afternoon':'evening')+'!',{interrupt:true}); return true; }
     if(/\bhow are you\b|how('?s| is) it going|how do you do/.test(said)){ speak('I\u2019m doing well and ready to help. What do you need?',{interrupt:true}); return true; }
-    if(/\bwho (made|created|built)\b|your (maker|creator)/.test(said)){ speak('I\u2019m the Smart Vision Assistant, a demo that runs right here in your browser.',{interrupt:true}); return true; }
+    if(/\bwho (made|created|built)\b|your (maker|creator)/.test(said)){ speak('I\u2019m the ARGOS Vision Assistant,a program written by Scuderia Alpharazzo',{interrupt:true}); return true; }
     if(/^(hi|hey|hello|yo|hiya|howdy)( there)?[\s.!,]*$/.test(said)){ speak('Hello! How can I help?',{interrupt:true}); return true; }
     return false;
   }
