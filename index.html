@@ -349,7 +349,7 @@
       </svg>
     </div>
 
-    <h1>Smart Vision <span class="hl">Assistant</span></h1>
+    <h1> <span class="hl">ARGOS</span></h1>
     <p class="lede">Point your camera. It describes what's ahead and reads printed text aloud — instantly.</p>
 
     <div class="capcards" aria-hidden="true">
@@ -1247,7 +1247,7 @@
   histExport.addEventListener('click', ()=>{
     if(!history.length){ showToast('No history to export yet.'); return; }
     const body = history.map(h=>'['+new Date(h.t).toLocaleString()+']\n'+h.text).join('\n\n----\n\n');
-    const blob=new Blob(['Smart Vision Assistant — reading history\n\n'+body], {type:'text/plain'});
+    const blob=new Blob(['ARGOS Vision Assistant — reading history\n\n'+body], {type:'text/plain'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a'); a.href=url; a.download='reading-history.txt';
     document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
@@ -1573,7 +1573,7 @@
     speak('I can see '+n+' object'+(n>1?'s':'')+' ahead: '+names+'.',{interrupt:true});
   }
   function answerIdentity(){
-    speak('I\u2019m your Smart Vision Assistant. I describe what\u2019s ahead, read printed text aloud, '
+    speak('I\u2019m your ARGOS Vision Assistant. I describe what\u2019s ahead, read printed text aloud, '
       +'and answer quick questions like the time, date and weather \u2014 all on your device.',{interrupt:true});
   }
   function answerHelp(){
